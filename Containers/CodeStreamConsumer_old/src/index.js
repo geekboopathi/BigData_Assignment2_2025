@@ -10,54 +10,6 @@ const CloneStorage = require('./CloneStorage');
 const FileStorage = require('./FileStorage');
 
 
-// ==============================
-// NEW: simple in-memory stats log
-// ==============================
-const processingStats = []; // { when, name, lines, chunks, timers: {total, match, ...}, msPerKLOC }
-const MAX_STATS = 5000;     // keep memory bounded
-
-function bigintNsToMs(bi) {
-    try { return Number(bi) / 1e6; } catch { return 0; }
-}
-
-function recordStats(file) {
-    const timers = Timer.getTimers(file) || {};
-    const totalMs = bigintNsToMs(timers.total ?? 0n);
-    const matchMs = bigintNsToMs(timers.match ?? 0n);
-
-    const lines = (file.lines || []).length;        // still available before prune
-    const chunks = (file.chunks || []).length || 0; // may be 0 if small file
-    const kloc = Math.max(lines / 1000, 0.001);     // avoid div-by-zero
-    const msPerKLOC = Math.round((totalMs / kloc) * 100) / 100;
-
-    processingStats.push({
-        when: new Date().toISOString(),
-        name: file.name,
-        lines,
-        chunks,
-        timers: Object.fromEntries(
-            Object.entries(timers).map(([k, v]) => [k, bigintNsToMs(v)])
-        ),
-        msPerKLOC
-    });
-
-    if (processingStats.length > MAX_STATS) processingStats.shift();
-}
-
-function averageOfLast(key, n) {
-    const slice = processingStats.slice(-n);
-    if (slice.length === 0) return 0;
-    const sum = slice.reduce((acc, s) => acc + (s.timers[key] || 0), 0);
-    return Math.round((sum / slice.length) * 100) / 100;
-}
-
-function overallAverage(key) {
-    if (processingStats.length === 0) return 0;
-    const sum = processingStats.reduce((acc, s) => acc + (s.timers[key] || 0), 0);
-    return Math.round((sum / processingStats.length) * 100) / 100;
-}
-
-
 // Express and Formidable stuff to receice a file for further processing
 // --------------------
 const form = formidable({multiples:false});
@@ -72,108 +24,6 @@ function fileReceiver(req, res, next) {
 }
 
 app.get('/', viewClones );
-
-// ==============================
-// NEW: timers/statistics routes
-// ==============================
-app.get('/timers.json', (req, res) => {
-    res.json({
-        count: processingStats.length,
-        averages: {
-            overall: {
-                totalMs: overallAverage('total'),
-                matchMs: overallAverage('match')
-            },
-            last100: {
-                totalMs: averageOfLast('total', 100),
-                matchMs: averageOfLast('match', 100)
-            },
-            last1000: {
-                totalMs: averageOfLast('total', 1000),
-                matchMs: averageOfLast('match', 1000)
-            }
-        },
-        stats: processingStats
-    });
-});
-
-app.get('/timers', (req, res) => {
-    const rows = processingStats.map(s => `
-        <tr>
-            <td>${s.when}</td>
-            <td title="${s.name}">${s.name.split(/[\\/]/).pop()}</td>
-            <td class="r">${s.lines}</td>
-            <td class="r">${s.chunks}</td>
-            <td class="r">${(s.timers.total ?? 0).toFixed(2)}</td>
-            <td class="r">${(s.timers.match ?? 0).toFixed(2)}</td>
-            <td class="r">${s.msPerKLOC.toFixed(2)}</td>
-        </tr>
-    `).join('');
-
-    const html = `
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8"/>
-      <title>CodeStream – Timers</title>
-      <style>
-        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;}
-        table{border-collapse:collapse;width:100%;}
-        th,td{border:1px solid #ddd;padding:8px;}
-        th{background:#f6f6f6;text-align:left;}
-        tr:nth-child(even){background:#fafafa;}
-        .r{text-align:right;}
-        .cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;}
-        .card{border:1px solid #ddd;border-radius:10px;padding:12px;min-width:220px;}
-        .muted{color:#666;font-size:0.9em;}
-      </style>
-    </head>
-    <body>
-      <h1>Processing Timers</h1>
-      <div class="cards">
-        <div class="card">
-          <div class="muted">Overall avg</div>
-          <div>Total: <b>${overallAverage('total').toFixed(2)} ms</b></div>
-          <div>Match: <b>${overallAverage('match').toFixed(2)} ms</b></div>
-        </div>
-        <div class="card">
-          <div class="muted">Last 100</div>
-          <div>Total: <b>${averageOfLast('total',100).toFixed(2)} ms</b></div>
-          <div>Match: <b>${averageOfLast('match',100).toFixed(2)} ms</b></div>
-        </div>
-        <div class="card">
-          <div class="muted">Last 1000</div>
-          <div>Total: <b>${averageOfLast('total',1000).toFixed(2)} ms</b></div>
-          <div>Match: <b>${averageOfLast('match',1000).toFixed(2)} ms</b></div>
-        </div>
-        <div class="card">
-          <div class="muted">Count</div>
-          <div><b>${processingStats.length}</b> files</div>
-        </div>
-      </div>
-
-      <p class="muted">Normalized time = Total ms per KLOC (1 KLOC = 1,000 lines).</p>
-
-      <table>
-        <thead>
-          <tr>
-            <th>When</th>
-            <th>File</th>
-            <th class="r">Lines</th>
-            <th class="r">Chunks</th>
-            <th class="r">Total (ms)</th>
-            <th class="r">Match (ms)</th>
-            <th class="r">ms / KLOC</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-
-      <p><a href="/timers.json">Raw JSON</a> • <a href="/">Back to Home</a></p>
-    </body>
-    </html>`;
-    res.type('html').send(html);
-});
 
 const server = app.listen(PORT, () => { console.log('Listening for files on port', PORT); });
 
@@ -234,7 +84,6 @@ function viewClones(req, res, next) {
     let page='<HTML><HEAD><TITLE>CodeStream Clone Detector</TITLE></HEAD>\n';
     page += '<BODY><H1>CodeStream Clone Detector</H1>\n';
     page += '<P>' + getStatistics() + '</P>\n';
-    page += '<P>See detailed timing trends at <a href="/timers">/timers</a>.</P>\n';
     page += lastFileTimersHTML() + '\n';
     page += listClonesHTML() + '\n';
     page += listProcessedFilesHTML() + '\n';
@@ -268,7 +117,6 @@ function maybePrintStatistics(file, cloneDetector, cloneStore) {
         }
         console.log(str);
         console.log('List of found clones available at', URL);
-        console.log('Detailed timing stats available at', URL + 'timers');
     }
 
     return file;
@@ -291,13 +139,14 @@ function processFile(filename, contents) {
         .then( (file) => cloneStore.storeClones(file) )
         .then( (file) => Timer.endTimer(file, 'match') )
 
-        // NEW: record stats BEFORE pruning (so we still have file.lines)
-        .then( PASS( (file) => recordStats(file) ) )
-
         .then( (file) => cd.storeFile(file) )
         .then( (file) => Timer.endTimer(file, 'total') )
         .then( PASS( (file) => lastFile = file ))
         .then( PASS( (file) => maybePrintStatistics(file, cd, cloneStore) ))
+    // TODO Store the timers from every file (or every 10th file), create a new landing page /timers
+    // and display more in depth statistics there. Examples include:
+    // average times per file, average times per last 100 files, last 1000 files.
+    // Perhaps throw in a graph over all files.
         .catch( console.log );
 };
 
